@@ -36,8 +36,8 @@ int del_ay = 0; // declare the delay value
 bool motorState = defaultMotorState;     // Current motor state
 
 // Threshold distances
-int minDistance = 7; // Default minimum distance (water full level)
-int maxDistance = 65; // Default maximum distance (water low level)
+int minDistance = defaultMinDistance;
+int maxDistance = defaultMaxDistance;
 
 // Create Wi-Fi and MQTT clients
 WiFiClient espClient;
@@ -47,22 +47,32 @@ PubSubClient client(espClient);
 void connectToWiFi();
 void connectToMQTT();
 long measureDistance();
+int measureDistanceAverage();
 void blinkLED(int frequency);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void showConnectingPattern();
-void keepPowerBankActive();
-void calculateAndPublishPercentage();
 void controlMotor(bool state);
-
-// Declare the static variable globally so it persists across loop iterations
-static unsigned long lastActivityTime = 0;
 
 // For non-blocking loop timing
 unsigned long lastMeasurementTime = 0;
 
+// WiFi reconnection timer
+unsigned long lastWifiCheckTime = 0;
+
+// Non-blocking buzzer variables
+bool buzzerActive = false;
+unsigned long buzzerStartTime = 0;
+int buzzerBeepCount = 0;
+bool buzzerOn = false;
+
+// Non-blocking display variables
+unsigned long displayShowTime = 0;
+bool displayTemporary = false;
+int lastPercentage = 0;
+
 void setup() {
   // Initialize serial communication
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   // Set pin modes for ultrasonic sensor
   pinMode(trigPin, OUTPUT);
@@ -78,7 +88,7 @@ void setup() {
 
   // Set pin mode for the motor relay
   pinMode(motorRelayPin, OUTPUT);
-  digitalWrite(motorRelayPin, LOW); // Turn off the motor initially (assuming LOW = OFF)
+  digitalWrite(motorRelayPin, HIGH); // Turn off the motor initially (active LOW)
 
   // Initialize the TM1637 display
   display.setBrightness(1); // Set brightness (0-7, 7 is max)
@@ -98,6 +108,41 @@ void setup() {
 }
 
 void loop() {
+  // Non-blocking buzzer handling
+  if (buzzerActive) {
+    unsigned long elapsed = millis() - buzzerStartTime;
+    if (!buzzerOn && elapsed >= 150) {
+      digitalWrite(buzzerPin, LOW);
+      buzzerOn = true;
+      buzzerStartTime = millis();
+    } else if (buzzerOn && elapsed >= 150) {
+      digitalWrite(buzzerPin, HIGH);
+      buzzerOn = false;
+      buzzerStartTime = millis();
+      buzzerBeepCount++;
+      if (buzzerBeepCount >= 3) {
+        buzzerActive = false;
+      }
+    }
+  }
+
+  // Non-blocking display restoration
+  if (displayTemporary && millis() - displayShowTime >= 500) {
+    displayTemporary = false;
+    if (displayEnabled) {
+      display.showNumberDec(lastPercentage, false);
+    }
+  }
+
+  // Check WiFi connection every 30 seconds
+  if (!offlineMode && millis() - lastWifiCheckTime >= 30000) {
+    lastWifiCheckTime = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi disconnected, attempting to reconnect...");
+      WiFi.reconnect();
+    }
+  }
+
   // If not in offline mode, ensure the MQTT client stays connected
   if (!offlineMode && !client.connected()) {
     connectToMQTT();
@@ -110,14 +155,20 @@ void loop() {
   if (now - lastMeasurementTime >= del_ay) {
     lastMeasurementTime = now;
 
-    // Measure the distance
-    long duration = measureDistance();
-    int distance = duration * 0.034 / 2; // Convert duration to distance in cm
+    // Measure the distance (averaged from 3 readings)
+    int distance = measureDistanceAverage();
+
+    // Guard against division by zero
+    int tankHeight = maxDistance - minDistance;
+    if (tankHeight <= 0) {
+      Serial.println("Error: maxDistance must be greater than minDistance");
+      del_ay = currentDelay;
+      return;
+    }
 
     // Calculate the water level percentage
-    int tankHeight = maxDistance - minDistance; // Calculate the tank height
-    int waterLevel = tankHeight - (distance - minDistance); // Calculate water level
-    int percentage = (waterLevel * 100) / tankHeight; // Calculate percentage
+    int waterLevel = tankHeight - (distance - minDistance);
+    int percentage = (waterLevel * 100) / tankHeight;
 
     // Ensure percentage is within 0-100 range
     if (percentage < 0) percentage = 0;
@@ -125,30 +176,27 @@ void loop() {
 
     // Check if the distance is out of range (for buzzer)
     if (distance < minDistance || distance > maxDistance) {
-      if (buzzerSound) { // Only buzz if enabled
-        for (int i = 0; i < 3; i++) { // Beep 3 times
-          digitalWrite(buzzerPin, LOW); // Turn on the buzzer
-          delay(150);                   // Buzzer on for 150ms
-          digitalWrite(buzzerPin, HIGH); // Turn off the buzzer
-          delay(150);                   // Buzzer off for 150ms
-        }
-        // Reduce the delay to 800 ms while the buzzer is active
+      if (buzzerSound && !buzzerActive) {
+        buzzerActive = true;
+        buzzerStartTime = millis();
+        buzzerBeepCount = 0;
+        buzzerOn = false;
         del_ay = 800;
       }
-    } 
-    else {
+    } else {
       // Ensure the buzzer is off
       digitalWrite(buzzerPin, HIGH);
+      buzzerActive = false;
       // Restore the delay when the distance is within range
       del_ay = currentDelay;
     }
 
-    // Only proceed if the distance has changed
-    if (distance != previousDistance) {
-      // Update the previous distance
+    // Only proceed if the distance has changed by more than 2cm (filter noise)
+    if (abs(distance - previousDistance) > 2) {
       previousDistance = distance;
+      lastPercentage = percentage;
 
-      // Print the distance and percentage to the Serial Monitor in a single line
+      // Print the distance and percentage to the Serial Monitor
       Serial.print("Distance: ");
       Serial.print(distance);
       Serial.print(" cm, Water Level: ");
@@ -160,113 +208,105 @@ void loop() {
       if (!offlineMode) {
         char message[10];
         snprintf(message, sizeof(message), "%d", percentage);
-        client.publish(publishTopic, message, true); // Retain the message with QoS 1
+        client.publish(publishTopic, message, true);
       }
 
-      // Display the percentage on the TM1637 4-segment display (if enabled)
-      if (displayEnabled) {
-        if (percentage < 0 || percentage > 9999) {
-          // If the percentage is out of range, display "----"
-          display.showNumberDec(9999, false);
-        } else {
-          // Display the percentage normally
-          display.showNumberDec(percentage, false);
-        }
-      } else {
-        // Turn off the display
-        display.clear();
+      // Display the percentage on the TM1637 display (if enabled and not temporarily showing a value)
+      if (displayEnabled && !displayTemporary) {
+        display.showNumberDec(percentage, false);
       }
     }
   }
-  // No delay here! Loop runs fast for MQTT responsiveness.
 }
 
 // Function to control motor
 void controlMotor(bool state) {
   motorState = state;
-  digitalWrite(motorRelayPin, state ? HIGH : LOW); // Assuming HIGH = ON, LOW = OFF
+  digitalWrite(motorRelayPin, state ? LOW : HIGH); // Active LOW relay
   Serial.print("Motor turned ");
   Serial.println(state ? "ON" : "OFF");
+
+  // Publish motor state back
+  if (!offlineMode) {
+    char message[10];
+    snprintf(message, sizeof(message), "%d", state ? 1 : 0);
+    client.publish(publishTopicMotor, message, true);
+  }
 }
 
 // Function to measure distance using the ultrasonic sensor
 long measureDistance() {
-  // Send a 10-microsecond pulse to the Trig pin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  // Read the Echo pin and calculate the duration
-  return pulseIn(echoPin, HIGH);
+  // 30ms timeout — max range ~400cm = ~23ms pulse
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  return duration * 0.034 / 2;
 }
 
-// Function to calculate and publish water level percentage
-void calculateAndPublishPercentage() {
-  int tankHeight = maxDistance - minDistance; // Calculate the tank height
-  int waterLevel = tankHeight - (previousDistance - minDistance); // Calculate water level
-  int percentage = (waterLevel * 100) / tankHeight; // Calculate percentage
-
-  // Ensure percentage is within 0-100 range
-  if (percentage < 0) percentage = 0;
-  if (percentage > 100) percentage = 100;
-
-  // Publish the percentage to the MQTT topic
-  if (!offlineMode) {
-    char message[10];
-    snprintf(message, sizeof(message), "%d", percentage);
-    client.publish(publishTopic, message, true); // Retain the message with QoS 1
+int measureDistanceAverage() {
+  long total = 0;
+  int validReadings = 0;
+  for (int i = 0; i < 3; i++) {
+    long dist = measureDistance();
+    if (dist > 0) {
+      total += dist;
+      validReadings++;
+    }
+    delay(10);
   }
-
-  // Print the percentage to the Serial Monitor
-  Serial.print("Water Level Percentage: ");
-  Serial.print(percentage);
-  Serial.println("%");
+  if (validReadings == 0) return 0;
+  return total / validReadings;
 }
 
 // Function to connect to Wi-Fi
 void connectToWiFi() {
   Serial.print("Connecting to Wi-Fi...");
   WiFi.begin(ssid, password);
-  WiFi.setSleepMode(WIFI_LIGHT_SLEEP);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
-  unsigned long startTime = millis(); // Record the start time
+  unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    blinkLED(500); // Blink LED every 500ms while connecting to Wi-Fi
-    showConnectingPattern(); // Show connecting pattern on the display
+    blinkLED(500);
+    showConnectingPattern();
     Serial.print(".");
 
-    // Check if 60 seconds have passed
     if (millis() - startTime > 60000) {
       Serial.println("\nFailed to connect to Wi-Fi within 60 seconds. Entering offline mode.");
-      offlineMode = true; // Enable offline mode
-      display.clear();    // Clear the display
-      return;             // Exit the function
+      offlineMode = true;
+      display.clear();
+      return;
     }
   }
 
   Serial.println("\nWi-Fi connected!");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
-  digitalWrite(ledPin, HIGH); // Turn off the LED after connection
+  digitalWrite(ledPin, HIGH); // LED OFF after connection
 }
 
 // Function to connect to the MQTT broker
 void connectToMQTT() {
+  unsigned long startTime = millis();
   while (!client.connected()) {
-    Serial.print("Connecting to MQTT...");
-    blinkLED(200); // Blink LED every 200ms while connecting to MQTT
-    showConnectingPattern(); // Show connecting pattern on the display
+    // Timeout after 15 seconds — will retry next loop
+    if (millis() - startTime > 15000) {
+      Serial.println("MQTT connection timeout, will retry later.");
+      return;
+    }
 
-    // Set Last Will and Testament (LWT) during the connect call
+    Serial.print("Connecting to MQTT...");
+
     if (client.connect(WS_DEVICE_CLIENTID, MQTT_USER, MQTT_PASSWORD, publishTopic, 1, true, "offline")) {
       Serial.println("connected!");
-      client.subscribe(subscribeTopicMinDist); // Subscribe to minimum distance updates
-      client.subscribe(subscribeTopicMaxDist); // Subscribe to maximum distance updates
-      client.subscribe(subscribeTopicDisplay); // Subscribe to display control
-      client.subscribe(subscribeTopicBuzzer);  // Subscribe to buzzer control
-      client.subscribe(subscribeTopicMotor);   // Subscribe to motor control
+      client.subscribe(subscribeTopicMinDist);
+      client.subscribe(subscribeTopicMaxDist);
+      client.subscribe(subscribeTopicDisplay);
+      client.subscribe(subscribeTopicBuzzer);
+      client.subscribe(subscribeTopicMotor);
       Serial.println("Subscribed to all topics including motor control");
     } else {
       Serial.print("failed, rc=");
@@ -275,7 +315,7 @@ void connectToMQTT() {
       delay(5000);
     }
   }
-  digitalWrite(ledPin, HIGH); // Turn off the LED after connection
+  digitalWrite(ledPin, HIGH); // LED OFF after connection
 }
 
 // Function to blink the LED at a specified frequency
@@ -299,14 +339,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message received on topic: ");
   Serial.println(topic);
 
-  // Convert the payload to a null-terminated string
   char message[length + 1];
   memcpy(message, payload, length);
-  message[length] = '\0'; // Null-terminate the string
+  message[length] = '\0';
 
-  // Handle motor control
-  if (String(topic) == subscribeTopicMotor) {
-    int newMotorState = atoi(message); // Convert the message to an integer
+  // Show value on display FIRST for all control topics
+  if (
+    strcmp(topic, subscribeTopicMinDist) == 0 ||
+    strcmp(topic, subscribeTopicMaxDist) == 0 ||
+    strcmp(topic, subscribeTopicDisplay) == 0 ||
+    strcmp(topic, subscribeTopicBuzzer) == 0 ||
+    strcmp(topic, subscribeTopicMotor) == 0
+  ) {
+    int displayValue = atoi(message);
+    if (displayValue >= 0 && displayValue <= 9999) {
+      display.showNumberDec(displayValue, false);
+    } else {
+      display.showNumberDecEx(0, 0b01000000, false);
+    }
+    displayShowTime = millis();
+    displayTemporary = true;
+    Serial.print("Display showing: ");
+    Serial.println(displayValue);
+  }
+
+  if (strcmp(topic, subscribeTopicMotor) == 0) {
+    int newMotorState = atoi(message);
     if (newMotorState == 1) {
       controlMotor(true);
       Serial.println("Motor turned ON via MQTT");
@@ -318,29 +376,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
-  // Display on TM1637 for all control topics
-  if (
-    String(topic) == subscribeTopicMinDist ||
-    String(topic) == subscribeTopicMaxDist ||
-    String(topic) == subscribeTopicDisplay ||
-    String(topic) == subscribeTopicBuzzer ||
-    String(topic) == subscribeTopicMotor
-  ) {
-    int displayValue = atoi(message); // Convert the message to an integer
-    if (displayValue >= 0 && displayValue <= 9999) {
-      display.showNumberDec(displayValue, false); // Show the value on the display
-      delay(500); // Keep the value displayed for 0.5 seconds
-    } else {
-      // If the value is invalid, show "----" temporarily
-      display.showNumberDecEx(0, 0b01000000, false); // Show "----"
-      delay(500);
-    }
-  }
-
-  // Handle minimum distance updates
-  if (String(topic) == subscribeTopicMinDist) {
-    int newMinDistance = atoi(message); // Convert the message to an integer
-    if (newMinDistance > 0) { // Ensure the new minimum distance is valid
+  if (strcmp(topic, subscribeTopicMinDist) == 0) {
+    int newMinDistance = atoi(message);
+    if (newMinDistance > 0) {
       minDistance = newMinDistance;
       Serial.print("Updated minDistance to: ");
       Serial.println(minDistance);
@@ -349,9 +387,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
-  // Handle buzzer control
-  if (String(topic) == subscribeTopicBuzzer) {
-    int newBuzzerState = atoi(message); // Convert the message to an integer
+  if (strcmp(topic, subscribeTopicBuzzer) == 0) {
+    int newBuzzerState = atoi(message);
     if (newBuzzerState == 1) {
       buzzerSound = true;
       Serial.println("Buzzer enabled.");
@@ -363,10 +400,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
-  // Handle maximum distance updates
-  if (String(topic) == subscribeTopicMaxDist) {
-    int newMaxDistance = atoi(message); // Convert the message to an integer
-    if (newMaxDistance > minDistance) { // Ensure the new maximum distance is valid
+  if (strcmp(topic, subscribeTopicMaxDist) == 0) {
+    int newMaxDistance = atoi(message);
+    if (newMaxDistance > minDistance) {
       maxDistance = newMaxDistance;
       Serial.print("Updated maxDistance to: ");
       Serial.println(maxDistance);
@@ -375,25 +411,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
-  // Handle display control
-  if (String(topic) == subscribeTopicDisplay) {
-    int newDisplayState = atoi(message); // Convert the message to an integer
+  if (strcmp(topic, subscribeTopicDisplay) == 0) {
+    int newDisplayState = atoi(message);
     if (newDisplayState == 1) {
       displayEnabled = true;
       Serial.println("Display enabled.");
     } else if (newDisplayState == 0) {
       displayEnabled = false;
-      display.clear(); // Turn off the display
+      display.clear();
       Serial.println("Display disabled.");
     } else {
       Serial.println("Invalid display state received.");
     }
   }
-}
-
-void keepPowerBankActive() {
-  // Toggle a GPIO pin to simulate activity
-  digitalWrite(ledPin, LOW); // Turn on the built-in LED
-  delay(100);
-  digitalWrite(ledPin, HIGH); // Turn off the LED
 }
