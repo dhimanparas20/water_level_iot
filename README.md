@@ -161,12 +161,12 @@ All configurable values are in `config.h`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ssid` | `"MST Protocol"` | WiFi SSID |
-| `password` | `"Blackkaiser69"` | WiFi password |
-| `MQTT_SERVER` | `"mqtt.mstservices.me"` | MQTT broker hostname |
+| `ssid` | `"<WIFI SSID>"` | WiFi SSID |
+| `password` | `"<WIFI PASSWORD>"` | WiFi password |
+| `MQTT_SERVER` | `"<MQTT SERVER>"` | MQTT broker hostname |
 | `MQTT_PORT` | `1883` | MQTT broker port |
-| `MQTT_USER` | `"dhimanparas20@gmail.com"` | MQTT username |
-| `MQTT_PASSWORD` | `"Luffykiid@2069"` | MQTT password |
+| `MQTT_USER` | `"<MQTT USER>"` | MQTT username |
+| `MQTT_PASSWORD` | `"<MQTT PASSWORD>"` | MQTT password |
 | `defaultMinDistance` | `7` | Full tank distance (cm) |
 | `defaultMaxDistance` | `65` | Empty tank distance (cm) |
 | `currentDelay` | `5000` | Measurement interval (ms) |
