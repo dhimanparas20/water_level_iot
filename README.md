@@ -104,7 +104,7 @@ If WiFi fails to connect within 60 seconds, the device enters **offline mode**:
 
 - **Server:** `mqtt.mstservices.me`
 - **Port:** `1883`
-- **Client ID:** `9POWuKe/nodemcuwatertank`
+- **Client ID:** `<TOKEN>/nodemcuwatertank`
 - **LWT:** Publishes `"offline"` to `watertank/percentage` on disconnect (retained)
 
 ### Topics
