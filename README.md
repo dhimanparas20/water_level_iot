@@ -102,7 +102,7 @@ If WiFi fails to connect within 60 seconds, the device enters **offline mode**:
 
 ### Broker Configuration
 
-- **Server:** `mqtt.mstservices.me`
+- **Server:** `mqtt.msttech.in`
 - **Port:** `1883`
 - **Client ID:** `<TOKEN>/nodemcuwatertank`
 - **LWT:** Publishes `"offline"` to `watertank/percentage` on disconnect (retained)
@@ -130,25 +130,25 @@ If WiFi fails to connect within 60 seconds, the device enters **offline mode**:
 
 ```bash
 # Turn motor ON
-mosquitto_pub -h mqtt.mstservices.me -t "watertank/motor" -m "1"
+mosquitto_pub -h mqtt.msttech.in -t "watertank/motor" -m "1"
 
 # Turn motor OFF
-mosquitto_pub -h mqtt.mstservices.me -t "watertank/motor" -m "0"
+mosquitto_pub -h mqtt.msttech.in -t "watertank/motor" -m "0"
 
 # Set max distance to 70cm
-mosquitto_pub -h mqtt.mstservices.me -t "watertank/maxdist" -m "70"
+mosquitto_pub -h mqtt.msttech.in -t "watertank/maxdist" -m "70"
 
 # Disable buzzer
-mosquitto_pub -h mqtt.mstservices.me -t "watertank/buzzer" -m "0"
+mosquitto_pub -h mqtt.msttech.in -t "watertank/buzzer" -m "0"
 
 # Enable display
-mosquitto_pub -h mqtt.mstservices.me -t "watertank/display" -m "1"
+mosquitto_pub -h mqtt.msttech.in -t "watertank/display" -m "1"
 
 # Subscribe to water level
-mosquitto_sub -h mqtt.mstservices.me -t "watertank/percentage"
+mosquitto_sub -h mqtt.msttech.in -t "watertank/percentage"
 
 # Subscribe to motor status feedback
-mosquitto_sub -h mqtt.mstservices.me -t "watertank/motor/status"
+mosquitto_sub -h mqtt.msttech.in -t "watertank/motor/status"
 ```
 
 ### Display Behavior
